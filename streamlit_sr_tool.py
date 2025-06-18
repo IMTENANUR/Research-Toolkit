@@ -1,4 +1,3 @@
-# ✅ START COPY FROM HERE
 import streamlit as st
 import pandas as pd
 import requests
@@ -12,23 +11,30 @@ import base64
 from docx import Document
 from docx.shared import Inches
 
-# Constants for PubMed
+# --- NCBI PubMed Constants ---
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 BASE_URL_SEARCH = f"{NCBI_BASE}esearch.fcgi"
 BASE_URL_FETCH = f"{NCBI_BASE}efetch.fcgi"
 MAX_RESULTS = 100
+API_KEY = st.secrets["ncbi_api_key"] if "ncbi_api_key" in st.secrets else None
+
+# --- Helper Functions ---
+def add_api_key(params):
+    if API_KEY:
+        params['api_key'] = API_KEY
+    return params
 
 @st.cache_data
 def fetch_pmids(query: str, retmax: int = 100) -> list:
     params = {'db': 'pubmed', 'term': query, 'retmax': retmax, 'retmode': 'json'}
-    resp = requests.get(BASE_URL_SEARCH, params=params)
+    resp = requests.get(BASE_URL_SEARCH, params=add_api_key(params))
     return resp.json().get('esearchresult', {}).get('idlist', [])
 
 @st.cache_data
 def fetch_mesh(pmids: list) -> pd.DataFrame:
     ids = ','.join(pmids)
     params = {'db': 'pubmed', 'id': ids, 'retmode': 'xml'}
-    resp = requests.get(BASE_URL_FETCH, params=params)
+    resp = requests.get(BASE_URL_FETCH, params=add_api_key(params))
     tree = ET.fromstring(resp.text)
     mesh_counts = {}
     for mh in tree.findall('.//MeshHeading/DescriptorName'):
@@ -46,7 +52,7 @@ def fetch_yearly_trend(term: str, start_year: int = 2000, end_year: int = None) 
     counts = []
     for yr in years:
         params = {'db': 'pubmed', 'term': f"{term}[Title/Abstract] AND {yr}[PDAT]", 'retmode': 'json'}
-        resp = requests.get(BASE_URL_SEARCH, params=params)
+        resp = requests.get(BASE_URL_SEARCH, params=add_api_key(params))
         counts.append(int(resp.json().get('esearchresult', {}).get('count', 0)))
     return pd.DataFrame({'year': years, 'count': counts})
 
@@ -54,10 +60,17 @@ def fetch_yearly_trend(term: str, start_year: int = 2000, end_year: int = None) 
 def fetch_abstracts(pmids: list) -> str:
     ids = ','.join(pmids)
     params = {'db': 'pubmed', 'id': ids, 'retmode': 'xml'}
-    resp = requests.get(BASE_URL_FETCH, params=params)
-    tree = ET.fromstring(resp.text)
-    abstracts = [ab.text or '' for ab in tree.findall('.//AbstractText')]
-    return ' '.join(abstracts)
+    resp = requests.get(BASE_URL_FETCH, params=add_api_key(params))
+    if not resp.ok or not resp.headers.get('Content-Type', '').startswith('text/xml'):
+        st.error("PubMed returned an unexpected response. Try reducing the number of articles or wait before retrying.")
+        return ""
+    try:
+        tree = ET.fromstring(resp.text)
+        abstracts = [ab.text or '' for ab in tree.findall('.//AbstractText')]
+        return ' '.join(abstracts)
+    except ET.ParseError:
+        st.error("Failed to parse XML. PubMed may have returned a malformed or throttled response.")
+        return ""
 
 @st.cache_data
 def word_frequency(text: str, top_n: int = 20) -> pd.DataFrame:
@@ -74,7 +87,7 @@ def fetch_study_details(pmids):
     results = []
     for pmid in pmids:
         fetch_params = {"db": "pubmed", "id": pmid, "retmode": "xml"}
-        response = requests.get(BASE_URL_FETCH, params=fetch_params)
+        response = requests.get(BASE_URL_FETCH, params=add_api_key(fetch_params))
         try:
             root = ET.fromstring(response.content)
             results.append({
@@ -143,4 +156,21 @@ if run and topic:
 with tab5:
     st.subheader("📄 PubMed Study Extractor")
     with st.form("pubmed_search_form"):
-        keywor
+        keyword_input = st.text_input("🔎 Enter PubMed Search Keywords", topic or "vitamin D AND pregnancy")
+        submitted = st.form_submit_button("Search")
+
+    if submitted:
+        st.info(f"Searching PubMed for: **{keyword_input}**")
+        with st.spinner("Fetching studies and parsing..."):
+            pmids = fetch_pmids(keyword_input, retmax=MAX_RESULTS)
+            if not pmids:
+                st.warning("No results found.")
+            else:
+                details = fetch_study_details(pmids)
+                df = pd.DataFrame(details)
+                st.dataframe(df)
+                csv = df.to_csv(index=False).encode("utf-8")
+                st.download_button("📥 Download Study Info CSV", csv, "pubmed_results.csv", "text/csv")
+
+st.markdown("---")
+st.caption("Developed by Nazish Masood Research Toolkit")
